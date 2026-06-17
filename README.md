@@ -181,12 +181,18 @@ python3 -c "import PyQt5; import pyqtgraph; print('OK')"
 ## Screenshots
 
 **Simple GUI (tkinter):**
+
+![Simple GUI (tkinter)](.pics/screenshot-tk.png)
+
 - Dark theme dashboard
 - Large watts display
 - Load progress bar
 - Color-coded status
 
 **Advanced Dashboard (PyQt5):**
+
+![Advanced Dashboard (PyQt5)](.pics/screenshot-pyqt5.png)
+
 - Real-time line graph
 - Multi-metric displays
 - Professional monitoring interface
