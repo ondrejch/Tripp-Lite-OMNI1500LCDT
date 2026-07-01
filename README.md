@@ -55,6 +55,35 @@ chmod +x *.py
 sudo apt install python3-pyqt5 python3-pyqtgraph
 ```
 
+### Building a Standalone Executable (Optional)
+
+If you want to compile `ups_monitor_pyqt5.py` into a single, standalone Unix executable that can run on other systems of the same architecture without installing Python dependencies, you can use PyInstaller:
+
+1. **Create and activate a virtual environment:**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. **Install dependencies and PyInstaller:**
+   ```bash
+   pip install pyinstaller pyqt5 pyqtgraph
+   ```
+
+3. **Build the executable:**
+   ```bash
+   pyinstaller --onefile --windowed --name ups_monitor_pyqt5 ups_monitor_pyqt5.py
+   ```
+
+The standalone executable will be generated at `./dist/ups_monitor_pyqt5`.
+
+You can run it directly:
+```bash
+./dist/ups_monitor_pyqt5
+```
+
+*Note: The executable still requires appropriate permissions to access `/dev/hidraw0`. See the [Troubleshooting](#permission-denied) section for setting up udev rules.*
+
 ---
 
 ## Usage
