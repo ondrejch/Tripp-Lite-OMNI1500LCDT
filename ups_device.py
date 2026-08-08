@@ -10,6 +10,64 @@ import os
 
 DEFAULT_DEVICE_PATH = "/dev/hidraw0"
 
+UPS_VID = "09ae"
+UPS_PID = "3016"
+
+
+def _find_usb_vid_pid(device_path: str) -> tuple[str, str] | None:
+    """Walk up sysfs from a device path to find idVendor/idProduct.
+
+    Returns ``(vid, pid)`` as lowercase hex strings, or ``None`` if not found.
+    """
+    current = device_path
+    root = os.path.sep
+    while current != root:
+        vid_file = os.path.join(current, "idVendor")
+        pid_file = os.path.join(current, "idProduct")
+        if os.path.isfile(vid_file) and os.path.isfile(pid_file):
+            try:
+                with open(vid_file) as f:
+                    vid = f.read().strip().lower()
+                with open(pid_file) as f:
+                    pid = f.read().strip().lower()
+                return (vid, pid)
+            except OSError:
+                return None
+        current = os.path.dirname(current)
+    return None
+
+
+def find_ups_device() -> str | None:
+    """Scan /sys/class/hidraw/ for the Tripp Lite UPS by VID/PID.
+
+    Returns the matching ``/dev/hidrawN`` path, or ``None`` if not found.
+    """
+    hidraw_dir = "/sys/class/hidraw"
+    try:
+        entries = os.listdir(hidraw_dir)
+    except OSError:
+        return None
+
+    for name in sorted(entries):
+        if not name.startswith("hidraw"):
+            continue
+        device_link = os.path.join(hidraw_dir, name, "device")
+        try:
+            device_path = os.path.realpath(device_link)
+        except OSError:
+            continue
+
+        result = _find_usb_vid_pid(device_path)
+        if result is None:
+            continue
+
+        vid, pid = result
+        if vid == UPS_VID and pid == UPS_PID:
+            return f"/dev/{name}"
+
+    return None
+
+
 # Linux hidraw ioctl constants.
 _IOC_NRBITS = 8
 _IOC_TYPEBITS = 8
@@ -89,9 +147,20 @@ class UPSDevice:
     REPORT_INPUT_FREQUENCY = 0x19
     REPORT_OUTPUT_FREQUENCY = 0x1C
 
-    def __init__(self, path: str = DEFAULT_DEVICE_PATH):
-        self.path = path
+    def __init__(self, path: str | None = None):
+        self.path = path or find_ups_device() or DEFAULT_DEVICE_PATH
         self._fd: int | None = None
+
+    @classmethod
+    def find(cls) -> "UPSDevice":
+        """Create a UPSDevice pointing to the auto-discovered UPS."""
+        path = find_ups_device()
+        if path is None:
+            raise UPSReadError(
+                f"Tripp Lite UPS (VID={UPS_VID}, PID={UPS_PID}) not found. "
+                "Check USB connection."
+            )
+        return cls(path=path)
 
     def __enter__(self) -> "UPSDevice":
         self.open()
@@ -149,6 +218,6 @@ class UPSDevice:
         )
 
 
-def read_metrics_once(path: str = DEFAULT_DEVICE_PATH) -> UPSMetrics:
+def read_metrics_once(path: str | None = None) -> UPSMetrics:
     with UPSDevice(path) as device:
         return device.read_metrics()

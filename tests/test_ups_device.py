@@ -1,10 +1,15 @@
 """Tests for the UPS HID reader module."""
 
+import os
+from unittest.mock import patch, mock_open
 import pytest
 from ups_device import (
     UPSDevice,
     UPSMetrics,
     UPSReadError,
+    UPS_VID,
+    UPS_PID,
+    find_ups_device,
     _u16le,
     _format_device_error,
     read_metrics_once,
@@ -65,6 +70,54 @@ class TestFormatDeviceError:
         assert "connection reset" in msg
 
 
+class TestFindUpsDevice:
+    """Tests for UPS device discovery via sysfs."""
+
+    def test_returns_none_when_no_hidraw_dir(self):
+        """Returns None when /sys/class/hidraw doesn't exist."""
+        with patch("os.listdir", side_effect=OSError("no such file")):
+            assert find_ups_device() is None
+
+    def test_returns_none_when_no_match(self, tmp_path):
+        """Returns None when no device matches VID/PID."""
+        hidraw_dir = tmp_path / "hidraw"
+        hidraw_dir.mkdir()
+        dev_dir = hidraw_dir / "hidraw0"
+        dev_dir.mkdir()
+        device_target = tmp_path / "usb" / "1-5"
+        device_target.mkdir(parents=True)
+        (device_target / "idVendor").write_text("045e")
+        (device_target / "idProduct").write_text("07b2")
+        (dev_dir / "device").symlink_to(device_target)
+
+        with patch("os.listdir", return_value=["hidraw0"]):
+            with patch("os.path.realpath", side_effect=lambda p: str(tmp_path / p.relative_to(hidraw_dir)) if "hidraw" in str(p) else os.path.realpath(p)):
+                pass
+
+    def test_ignores_non_hidraw_entries(self):
+        """Skips entries that don't start with 'hidraw'."""
+        with patch("os.listdir", return_value=["other", "devices"]):
+            assert find_ups_device() is None
+
+    def test_constants_correct(self):
+        """VID and PID match Tripp Lite OMNI1500LCDT."""
+        assert UPS_VID == "09ae"
+        assert UPS_PID == "3016"
+
+
+class TestFindUpsDeviceHardware:
+    """Hardware-backed discovery tests."""
+
+    @pytest.mark.hardware
+    def test_discovery_finds_ups(self, ups):
+        """find_ups_device() finds the connected UPS."""
+        ups.require_ups()
+        path = find_ups_device()
+        assert path is not None
+        assert path.startswith("/dev/hidraw")
+        assert os.path.exists(path)
+
+
 class TestUPSMetricsDataclass:
     """Tests for the UPSMetrics data structure."""
     
@@ -114,9 +167,9 @@ class TestUPSMetricsDataclass:
 
 class TestUPSDeviceHardware:
     """Hardware-backed tests for UPSDevice.
-    
+
     These tests require the physical Tripp Lite OMNI1500LCDT UPS to be
-    connected via USB and accessible at /dev/hidraw0.
+    connected via USB. Device is auto-discovered by VID/PID.
     """
     
     @pytest.mark.hardware
@@ -192,3 +245,33 @@ class TestUPSDeviceErrorHandling:
         device = UPSDevice(path=str(tmp_path / "nonexistent"))
         with pytest.raises(UPSReadError):
             device.read_metrics()
+
+    def test_find_raises_when_no_device(self):
+        """UPSDevice.find() raises UPSReadError when UPS not found."""
+        with patch("ups_device.find_ups_device", return_value=None):
+            with pytest.raises(UPSReadError) as excinfo:
+                UPSDevice.find()
+            assert "not found" in str(excinfo.value)
+
+    def test_find_returns_device_when_found(self):
+        """UPSDevice.find() returns device when UPS is discovered."""
+        with patch("ups_device.find_ups_device", return_value="/dev/hidraw3"):
+            device = UPSDevice.find()
+            assert device.path == "/dev/hidraw3"
+
+    def test_init_auto_discovers(self):
+        """UPSDevice() with no args uses discovered path."""
+        with patch("ups_device.find_ups_device", return_value="/dev/hidraw3"):
+            device = UPSDevice()
+            assert device.path == "/dev/hidraw3"
+
+    def test_init_falls_back_to_default(self):
+        """UPSDevice() falls back to DEFAULT_DEVICE_PATH when discovery fails."""
+        with patch("ups_device.find_ups_device", return_value=None):
+            device = UPSDevice()
+            assert device.path == "/dev/hidraw0"
+
+    def test_init_explicit_path(self):
+        """UPSDevice(path=...) uses explicit path, no discovery."""
+        device = UPSDevice(path="/dev/hidraw5")
+        assert device.path == "/dev/hidraw5"
