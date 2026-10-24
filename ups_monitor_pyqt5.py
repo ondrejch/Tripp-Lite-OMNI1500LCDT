@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import time
 from collections import deque
@@ -574,6 +575,22 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = UPSDashboard(compact=args.compact)
+
+    # Qt's event loop blocks in C++ and only comes back to the interpreter when
+    # an event invokes Python, so a default SIGINT would surface as a
+    # KeyboardInterrupt in the middle of a timer callback. A periodic no-op
+    # timer gives the interpreter a chance to run the handler below, which
+    # shuts down through the normal close path and joins the poller thread.
+    def handle_signal(_signum: int, _frame: object) -> None:
+        window.close()
+        app.quit()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal_timer = QTimer(window)
+    signal_timer.timeout.connect(lambda: None)
+    signal_timer.start(200)
+
     window.show()
     app.exec_()
 
