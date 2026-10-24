@@ -1,131 +1,198 @@
 """Tests for the UPS HID reader module."""
 
+from __future__ import annotations
+
+import errno
 import os
-from unittest.mock import patch, mock_open
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
+
 from ups_device import (
+    UPS_PID,
+    UPS_VID,
     UPSDevice,
     UPSMetrics,
     UPSReadError,
-    UPS_VID,
-    UPS_PID,
-    find_ups_device,
-    _u16le,
     _format_device_error,
+    _hid_iocgfeature,
+    _u16le,
+    find_ups_device,
     read_metrics_once,
 )
 
+# Feature-report payloads used by the fake ioctl: report ID -> raw value.
+FAKE_REPORTS = {
+    0x30: 120,  # nominal voltage, volts
+    0x1E: 22,  # load, percent
+    0x31: 1223,  # voltage, 0.1 V
+    0x46: 13,  # current, 0.1 A
+    0x47: 162,  # active power, W
+    0x19: 602,  # input frequency, 0.1 Hz
+    0x1C: 601,  # output frequency, 0.1 Hz
+}
 
-class TestU16le:
-    """Tests for little-endian 16-bit integer parsing.
-    
-    Note: _u16le() is designed for USB HID feature reports where the first
-    byte is the report ID, so default offset=1 is used.
-    """
-    
-    def test_basic_parsing_with_offset(self):
-        """Parse 16-bit values with explicit offset."""
-        # Simulate HID report with report ID prefix
-        assert _u16le(b"\x00\x10\x27") == 0x2710  # 10000
-        assert _u16le(b"\x00\x00\x00") == 0
-        assert _u16le(b"\x00\xff\xff") == 65535
-    
-    def test_basic_parsing_with_custom_offset(self):
-        """Parse 16-bit values with offset=1."""
-        assert _u16le(b"\x00\x10\x27", offset=1) == 0x2710
-    
-    def test_basic_parsing_at_offset_2(self):
-        """Parse 16-bit values at offset=2."""
-        # bytes at positions [2] and [3] form the 16-bit value
-        assert _u16le(b"\x00\x00\x10\x27", offset=2) == 0x2710
-    
-    def test_custom_offset(self):
-        """Parse with custom offset."""
-        data = b"\x00\x00\x10\x27\x00"
-        assert _u16le(data, offset=2) == 0x2710
-    
-    def test_default_offset(self):
-        """Default offset is 1."""
+
+def _fake_ioctl(fd, request, buf, mutate=False):
+    """Emulate HIDIOCGFEATURE by writing the payload into ``buf``."""
+    report_id = buf[0]
+    value = FAKE_REPORTS[report_id]
+    buf[0] = report_id
+    buf[1] = value & 0xFF
+    buf[2] = (value >> 8) & 0xFF
+    return 0
+
+
+def _make_hidraw(
+    sysfs: Path,
+    name: str,
+    vid: str = UPS_VID,
+    pid: str = UPS_PID,
+    uevent: bool = True,
+) -> Path:
+    """Create a fake /sys/class/hidraw/hidrawN entry."""
+    device_dir = sysfs / name / "device"
+    device_dir.mkdir(parents=True)
+    if uevent:
+        (device_dir / "uevent").write_text(
+            f"HID_ID=0003:0000{vid.upper()}:0000{pid.upper()}\n"
+            "HID_NAME=Tripp Lite OMNI1500LCDT\n",
+            encoding="utf-8",
+        )
+    return device_dir
+
+
+class TestU16Le:
+    """Little-endian decoding of HID report payloads."""
+
+    def test_parses_at_offset(self):
         assert _u16le(b"\x00\x10\x27") == 0x2710
+        assert _u16le(b"\x00\x00\x10\x27", offset=2) == 0x2710
+        assert _u16le(b"\x00\xff\xff") == 65535
+
+    def test_short_report_raises_ups_read_error(self):
+        with pytest.raises(UPSReadError, match="short HID report"):
+            _u16le(b"\x00\x10")
+
+
+class TestIoctlRequest:
+    """The ioctl request number must match hidraw.h's HIDIOCGFEATURE."""
+
+    @pytest.mark.skipif(sys.byteorder != "little", reason="Linux hidraw ioctls are LE")
+    def test_hid_iocgfeature_is_iowr_h_7(self):
+        # _IOWR('H', 0x07, 64) == 0xC0404807 on little-endian Linux.
+        assert _hid_iocgfeature(64) == 0xC0404807
 
 
 class TestFormatDeviceError:
     """Tests for error message formatting."""
-    
+
     def test_file_not_found(self):
-        """FileNotFoundError gives helpful message."""
         msg = _format_device_error("/dev/hidraw0", FileNotFoundError())
         assert "not found" in msg
         assert "Reconnect" in msg
-    
-    def test_permission_denied(self):
-        """PermissionError gives chmod instruction."""
+
+    def test_permission_denied_points_at_udev_not_chmod(self):
         msg = _format_device_error("/dev/hidraw0", PermissionError())
-        assert "chmod 666" in msg
-    
+        assert "udev rule" in msg
+        assert "chmod" not in msg
+
     def test_generic_os_error(self):
-        """Generic OSError passes through exc message."""
-        exc = OSError("connection reset")
-        msg = _format_device_error("/dev/hidraw0", exc)
+        msg = _format_device_error("/dev/hidraw0", OSError("connection reset"))
         assert "connection reset" in msg
 
 
 class TestFindUpsDevice:
-    """Tests for UPS device discovery via sysfs."""
+    """Discovery of the UPS hidraw node via a fake sysfs tree."""
 
-    def test_returns_none_when_no_hidraw_dir(self):
-        """Returns None when /sys/class/hidraw doesn't exist."""
-        with patch("os.listdir", side_effect=OSError("no such file")):
-            assert find_ups_device() is None
+    def test_returns_none_when_no_sysfs_dir(self, tmp_path):
+        assert find_ups_device(str(tmp_path / "missing")) is None
 
-    def test_returns_none_when_no_match(self, tmp_path):
-        """Returns None when no device matches VID/PID."""
-        hidraw_dir = tmp_path / "hidraw"
-        hidraw_dir.mkdir()
-        dev_dir = hidraw_dir / "hidraw0"
-        dev_dir.mkdir()
-        device_target = tmp_path / "usb" / "1-5"
-        device_target.mkdir(parents=True)
-        (device_target / "idVendor").write_text("045e")
-        (device_target / "idProduct").write_text("07b2")
-        (dev_dir / "device").symlink_to(device_target)
+    def test_finds_device_by_uevent_ids(self, tmp_path):
+        _make_hidraw(tmp_path, "hidraw3")
+        assert find_ups_device(str(tmp_path)) == "/dev/hidraw3"
 
-        with patch("os.listdir", return_value=["hidraw0"]):
-            with patch("os.path.realpath", side_effect=lambda p: str(tmp_path / p.relative_to(hidraw_dir)) if "hidraw" in str(p) else os.path.realpath(p)):
-                pass
+    def test_ignores_other_vid_pid(self, tmp_path):
+        _make_hidraw(tmp_path, "hidraw0", vid="045e", pid="07b2")
+        assert find_ups_device(str(tmp_path)) is None
 
-    def test_ignores_non_hidraw_entries(self):
-        """Skips entries that don't start with 'hidraw'."""
-        with patch("os.listdir", return_value=["other", "devices"]):
-            assert find_ups_device() is None
+    def test_ignores_non_hidraw_entries(self, tmp_path):
+        (tmp_path / "devices").mkdir()
+        _make_hidraw(tmp_path, "hidraw1")
+        assert find_ups_device(str(tmp_path)) == "/dev/hidraw1"
+
+    def test_sorts_numerically(self, tmp_path):
+        _make_hidraw(tmp_path, "hidraw10")
+        _make_hidraw(tmp_path, "hidraw2")
+        assert find_ups_device(str(tmp_path)) == "/dev/hidraw2"
+
+    def test_falls_back_to_idvendor_walk_when_uevent_missing(self, tmp_path):
+        device_dir = _make_hidraw(tmp_path, "hidraw0", uevent=False)
+        usb_device = tmp_path / "devices" / "usb1" / "1-1" / "1-1:1.0"
+        usb_device.mkdir(parents=True)
+        (usb_device.parent / "idVendor").write_text(f"{UPS_VID}\n", encoding="utf-8")
+        (usb_device.parent / "idProduct").write_text(f"{UPS_PID}\n", encoding="utf-8")
+        device_dir.rmdir()
+        device_dir.symlink_to(os.path.relpath(usb_device, device_dir.parent))
+
+        assert find_ups_device(str(tmp_path)) == "/dev/hidraw0"
+
+    def test_returns_none_when_uevent_has_no_hid_id(self, tmp_path):
+        device_dir = _make_hidraw(tmp_path, "hidraw0")
+        (device_dir / "uevent").write_text("HID_NAME=Tripp Lite\n", encoding="utf-8")
+        assert find_ups_device(str(tmp_path)) is None
 
     def test_constants_correct(self):
-        """VID and PID match Tripp Lite OMNI1500LCDT."""
         assert UPS_VID == "09ae"
         assert UPS_PID == "3016"
 
 
-class TestFindUpsDeviceHardware:
-    """Hardware-backed discovery tests."""
+class TestReadMetricsDecode:
+    """Decoding of feature reports into engineering units (no hardware)."""
 
-    @pytest.mark.hardware
-    def test_discovery_finds_ups(self, ups):
-        """find_ups_device() finds the connected UPS."""
-        ups.require_ups()
-        path = find_ups_device()
-        assert path is not None
-        assert path.startswith("/dev/hidraw")
-        assert os.path.exists(path)
+    def test_scaling_and_units(self, monkeypatch):
+        monkeypatch.setattr("ups_device.fcntl.ioctl", _fake_ioctl)
+        metrics = read_metrics_once("/dev/null")
+
+        assert metrics.load_percent == 22
+        assert metrics.active_power_watts == 162
+        assert metrics.voltage_volts == pytest.approx(122.3)
+        assert metrics.current_amps == pytest.approx(1.3)
+        assert metrics.input_frequency_hz == pytest.approx(60.2)
+        assert metrics.output_frequency_hz == pytest.approx(60.1)
+        assert metrics.nominal_voltage_volts == 120
+
+    def test_timestamp_is_utc_aware(self, monkeypatch):
+        monkeypatch.setattr("ups_device.fcntl.ioctl", _fake_ioctl)
+        metrics = read_metrics_once("/dev/null")
+        assert metrics.timestamp.tzinfo is timezone.utc
+        assert abs((datetime.now(timezone.utc) - metrics.timestamp).total_seconds()) < 5
+
+    def test_retries_transient_ioctl_errors(self, monkeypatch):
+        calls = {"n": 0}
+
+        def flaky_ioctl(fd, request, buf, mutate=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(errno.EAGAIN, "try again")
+            return _fake_ioctl(fd, request, buf, mutate)
+
+        monkeypatch.setattr("ups_device.fcntl.ioctl", flaky_ioctl)
+        monkeypatch.setattr("ups_device.time.sleep", lambda _seconds: None)
+        assert read_metrics_once("/dev/null").load_percent == 22
+        assert calls["n"] > 7  # first report was retried
 
 
 class TestUPSMetricsDataclass:
     """Tests for the UPSMetrics data structure."""
-    
-    def test_as_dict(self):
-        """as_dict returns all fields."""
-        from datetime import datetime
-        metrics = UPSMetrics(
-            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+
+    @pytest.fixture
+    def metrics(self) -> UPSMetrics:
+        return UPSMetrics(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
             load_percent=50,
             active_power_watts=450,
             voltage_volts=120.5,
@@ -134,144 +201,134 @@ class TestUPSMetricsDataclass:
             output_frequency_hz=60.0,
             nominal_voltage_volts=120,
         )
-        d = metrics.as_dict()
-        assert d["load_percent"] == 50
-        assert d["active_power_watts"] == 450
-        assert d["voltage_volts"] == 120.5
-        assert d["current_amps"] == 3.75
-        assert d["input_frequency_hz"] == 60.0
-        assert d["output_frequency_hz"] == 60.0
-        assert d["nominal_voltage_volts"] == 120
-    
-    def test_field_types(self):
-        """All fields have correct types."""
-        from datetime import datetime
-        metrics = UPSMetrics(
-            timestamp=datetime.now(),
-            load_percent=0,
-            active_power_watts=0,
-            voltage_volts=0.0,
-            current_amps=0.0,
-            input_frequency_hz=0.0,
-            output_frequency_hz=0.0,
-            nominal_voltage_volts=0,
+
+    def test_as_dict_is_json_friendly(self, metrics):
+        data = metrics.as_dict()
+        assert data["load_percent"] == 50
+        assert data["active_power_watts"] == 450
+        assert data["voltage_volts"] == 120.5
+        assert data["input_frequency_hz"] == 60.0
+        assert datetime.fromisoformat(data["timestamp"]) == metrics.timestamp
+
+    def test_apparent_power_is_volts_times_amps(self, metrics):
+        assert metrics.apparent_power_va == pytest.approx(120.5 * 3.75)
+        assert metrics.as_dict()["apparent_power_va"] == pytest.approx(451.9)
+
+
+class TestUPSDeviceErrors:
+    """Error handling and lifecycle without hardware."""
+
+    def test_nonexistent_path_raises_ups_read_error(self, tmp_path):
+        device = UPSDevice(path=str(tmp_path / "nonexistent"))
+        with pytest.raises(UPSReadError, match="not found"):
+            device.read_metrics()
+
+    def test_device_is_opened_read_only(self, monkeypatch, tmp_path):
+        calls = {}
+
+        def fake_open(path, flags, *args, **kwargs):
+            calls["flags"] = flags
+            raise OSError(errno.EACCES, "denied")
+
+        monkeypatch.setattr("ups_device.os.open", fake_open)
+        device = UPSDevice(path=str(tmp_path / "dev"))
+        with pytest.raises(UPSReadError):
+            device.open()
+        assert calls["flags"] == os.O_RDONLY
+
+    def test_constructor_raises_when_discovery_fails(self, monkeypatch):
+        monkeypatch.setattr("ups_device.find_ups_device", lambda *a, **k: None)
+        with pytest.raises(UPSReadError, match="not found"):
+            UPSDevice()
+
+    def test_find_returns_discovered_device(self, monkeypatch):
+        monkeypatch.setattr("ups_device.find_ups_device", lambda *a, **k: "/dev/hidraw3")
+        assert UPSDevice.find().path == "/dev/hidraw3"
+
+    def test_explicit_path_is_not_rediscovered(self, tmp_path):
+        device = UPSDevice(path=str(tmp_path / "dev"))
+        assert device.rediscover() is False
+        assert device.path == str(tmp_path / "dev")
+
+    def test_auto_device_reconnects_after_replug(self, monkeypatch):
+        found = iter(["/dev/hidraw3", "/dev/hidraw7"])
+        monkeypatch.setattr("ups_device.find_ups_device", lambda *a, **k: next(found))
+        device = UPSDevice()
+        assert device.path == "/dev/hidraw3"
+
+        sample = UPSMetrics(
+            timestamp=datetime.now(timezone.utc),
+            load_percent=10,
+            active_power_watts=90,
+            voltage_volts=120.0,
+            current_amps=0.8,
+            input_frequency_hz=60.0,
+            output_frequency_hz=60.0,
+            nominal_voltage_volts=120,
         )
-        assert isinstance(metrics.load_percent, int)
-        assert isinstance(metrics.active_power_watts, int)
-        assert isinstance(metrics.voltage_volts, float)
-        assert isinstance(metrics.current_amps, float)
-        assert isinstance(metrics.input_frequency_hz, float)
-        assert isinstance(metrics.output_frequency_hz, float)
-        assert isinstance(metrics.nominal_voltage_volts, int)
+        attempts = {"n": 0}
+
+        def flaky_read():
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise UPSReadError("/dev/hidraw3 not found") from OSError(errno.ENODEV, "gone")
+            return sample
+
+        monkeypatch.setattr(device, "_read_metrics", flaky_read)
+        assert device.read_metrics() is sample
+        assert device.path == "/dev/hidraw7"
+        assert attempts["n"] == 2
+
+    def test_close_is_idempotent(self, tmp_path):
+        device = UPSDevice(path=str(tmp_path / "dev"))
+        device.close()
+        device.close()
+
+    def test_context_manager_closes_fd(self, tmp_path):
+        device = UPSDevice(path=str(tmp_path / "dev"))
+        with patch("ups_device.os.open", return_value=42), patch("ups_device.os.close"):
+            with device as opened:
+                assert opened is device
+                assert device._fd == 42
+        assert device._fd is None
 
 
 class TestUPSDeviceHardware:
-    """Hardware-backed tests for UPSDevice.
+    """Hardware-backed tests for UPSDevice."""
 
-    These tests require the physical Tripp Lite OMNI1500LCDT UPS to be
-    connected via USB. Device is auto-discovered by VID/PID.
-    """
-    
     @pytest.mark.hardware
-    def test_device_opens_and_closes(self, ups):
-        """UPS device opens and closes without error."""
+    def test_discovery_finds_ups(self, ups):
+        ups.require_ups()
+        path = find_ups_device()
+        assert path is not None
+        assert path.startswith("/dev/hidraw")
+        assert os.path.exists(path)
+
+    @pytest.mark.hardware
+    def test_open_and_close(self, ups):
         ups.require_ups()
         device = UPSDevice()
-        try:
-            device.open()
-            device.close()
-        finally:
-            device.close()  # Idempotent close
-    
-    @pytest.mark.hardware
-    def test_device_context_manager(self, ups):
-        """UPSDevice works as context manager."""
-        ups.require_ups()
-        with UPSDevice() as device:
-            assert device._fd is not None
-        # fd should be closed after context
+        device.open()
+        device.close()
         assert device._fd is None
-    
+
     @pytest.mark.hardware
-    def test_read_metrics_returns_valid_data(self, ups):
-        """read_metrics() returns all fields with reasonable values."""
+    def test_read_metrics_returns_plausible_data(self, ups):
         ups.require_ups()
         metrics = read_metrics_once()
-        
-        # Check types
-        assert isinstance(metrics.load_percent, int)
-        assert isinstance(metrics.active_power_watts, int)
-        assert isinstance(metrics.voltage_volts, float)
-        assert isinstance(metrics.current_amps, float)
-        assert isinstance(metrics.input_frequency_hz, float)
-        assert isinstance(metrics.output_frequency_hz, float)
-        assert isinstance(metrics.nominal_voltage_volts, int)
-        
-        # Check physical reasonableness
-        assert 0 <= metrics.load_percent <= 100, f"Load {metrics.load_percent}% unrealistic"
-        assert 0 <= metrics.active_power_watts <= 900, f"Power {metrics.active_power_watts}W exceeds UPS capacity"
-        assert 100 <= metrics.voltage_volts <= 140, f"Voltage {metrics.voltage_volts}V unrealistic"
-        assert 55 <= metrics.input_frequency_hz <= 65, f"Input freq {metrics.input_frequency_hz}Hz unrealistic"
-        assert 55 <= metrics.output_frequency_hz <= 65, f"Output freq {metrics.output_frequency_hz}Hz unrealistic"
+
+        assert 0 <= metrics.load_percent <= 100
+        assert 0 <= metrics.active_power_watts <= 900
+        assert 100 <= metrics.voltage_volts <= 140
+        assert 55 <= metrics.input_frequency_hz <= 65
+        assert 55 <= metrics.output_frequency_hz <= 65
         assert metrics.nominal_voltage_volts > 0
-    
+
     @pytest.mark.hardware
-    def test_read_metrics_consistency(self, ups):
-        """Multiple reads return consistent values (within tolerance)."""
+    def test_reads_are_consistent(self, ups):
         ups.require_ups()
-        m1 = read_metrics_once()
-        m2 = read_metrics_once()
-        
-        # Voltage, current, freq should be similar
-        assert abs(m1.voltage_volts - m2.voltage_volts) < 5.0
-        assert abs(m1.input_frequency_hz - m2.input_frequency_hz) < 1.0
-        assert abs(m1.output_frequency_hz - m2.output_frequency_hz) < 1.0
-    
-    @pytest.mark.hardware
-    def test_permissions_error_handling(self, ups, tmp_path):
-        """When unable to open device, raises UPSReadError with helpful message."""
-        # This is hard to test with real device, test with nonexistent path
-        from ups_device import UPSDevice
-        device = UPSDevice(path=str(tmp_path / "nonexistent"))
-        with pytest.raises(UPSReadError):
-            device.read_metrics()
-
-
-class TestUPSDeviceErrorHandling:
-    """Tests for error conditions in UPSDevice."""
-    
-    def test_nonexistent_path_is_file_not_found_error(self, tmp_path):
-        """Nonexistent device path raises UPSReadError."""
-        device = UPSDevice(path=str(tmp_path / "nonexistent"))
-        with pytest.raises(UPSReadError):
-            device.read_metrics()
-
-    def test_find_raises_when_no_device(self):
-        """UPSDevice.find() raises UPSReadError when UPS not found."""
-        with patch("ups_device.find_ups_device", return_value=None):
-            with pytest.raises(UPSReadError) as excinfo:
-                UPSDevice.find()
-            assert "not found" in str(excinfo.value)
-
-    def test_find_returns_device_when_found(self):
-        """UPSDevice.find() returns device when UPS is discovered."""
-        with patch("ups_device.find_ups_device", return_value="/dev/hidraw3"):
-            device = UPSDevice.find()
-            assert device.path == "/dev/hidraw3"
-
-    def test_init_auto_discovers(self):
-        """UPSDevice() with no args uses discovered path."""
-        with patch("ups_device.find_ups_device", return_value="/dev/hidraw3"):
-            device = UPSDevice()
-            assert device.path == "/dev/hidraw3"
-
-    def test_init_falls_back_to_default(self):
-        """UPSDevice() falls back to DEFAULT_DEVICE_PATH when discovery fails."""
-        with patch("ups_device.find_ups_device", return_value=None):
-            device = UPSDevice()
-            assert device.path == "/dev/hidraw0"
-
-    def test_init_explicit_path(self):
-        """UPSDevice(path=...) uses explicit path, no discovery."""
-        device = UPSDevice(path="/dev/hidraw5")
-        assert device.path == "/dev/hidraw5"
+        first = read_metrics_once()
+        second = read_metrics_once()
+        assert abs(first.voltage_volts - second.voltage_volts) < 5.0
+        assert abs(first.input_frequency_hz - second.input_frequency_hz) < 1.0
+        assert abs(first.output_frequency_hz - second.output_frequency_hz) < 1.0

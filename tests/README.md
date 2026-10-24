@@ -1,76 +1,47 @@
 # UPS Power Monitor Tests
 
-Hardware-backed tests for the Tripp Lite OMNI1500LCDT UPS Power Monitor.
+Test suite for the Tripp Lite OMNI1500LCDT UPS Power Monitor.
+
+Most tests run **without hardware**: discovery parses a fake sysfs tree, and HID
+feature reports are faked at the `fcntl.ioctl` boundary. Only tests marked
+`hardware` need the UPS plugged in, and those are skipped automatically when no
+device is found.
 
 ## Prerequisites
 
-- Physical Tripp Lite OMNI1500LCDT UPS connected via USB
-- `/dev/hidraw0` accessible (run `sudo chmod 666 /dev/hidraw0` if needed)
-- pytest installed (`pip install pytest`)
+- Python 3.9+
+- `pip install -r requirements-dev.txt` (pytest, ruff)
+- For hardware tests: the UPS connected via USB, with read access to its
+  hidraw node (see the udev rule in the top-level README)
 
 ## Running Tests
 
-### All tests (requires UPS connected)
 ```bash
-cd /home/o/tmp/Tripp-Lite-OMNI1500LCDT
-pytest
+pytest                  # everything; hardware tests skip if no UPS
+pytest -m "not hardware"  # unit tests only
+pytest -m hardware      # only tests that need the UPS attached
+pytest -v               # verbose
 ```
 
-### Only unit tests (no UPS required)
-```bash
-pytest -m "not hardware"
-```
-
-### Verbose output
-```bash
-pytest -v
-```
-
-### With coverage
-```bash
-pytest --cov=ups_device --cov=ups_status -v
-```
-
-## Test Categories
+## Test Layout
 
 | Test File | Description | UPS Required |
 |-----------|-------------|--------------|
-| `test_ups_device.py` | Core HID reader logic | Yes (hardware marked) |
-| `test_ups_status.py` | CLI tool behavior | Yes |
-| `conftest.py` | Shared fixtures | N/A |
+| `test_ups_device.py` | Discovery, report decoding, error handling, reconnects | only `hardware` tests |
+| `test_ups_status.py` | CLI formatting, flags, exit codes | only the end-to-end smoke test |
+| `test_ups_poller.py` | Background polling thread (samples, errors, shutdown) | no |
+| `test_ups_theme.py` | Threshold colours and unit-aware captions | no |
+| `conftest.py` | Shared fixtures, automatic hardware-test skipping | — |
 
 ## Markers
 
-- `@pytest.mark.hardware` - Tests requiring physical UPS connection
+- `@pytest.mark.hardware` — test needs the physical UPS; skipped automatically
+  when `find_ups_device()` returns nothing.
 
-Skip hardware tests:
-```bash
-pytest -m "not hardware"
-```
+## Notes
 
-## Sample Test Output
-
-```
-============================= test session starts ==============================
-platform linux -- Python 3.12.3, pytest-7.4.4, pluggy-1.4.0 -- /usr/bin/python3
-collected 15 items
-
-tests/test_ups_device.py::TestU16le::test_basic_parsing PASSED
-tests/test_ups_device.py::TestU16le::test_custom_offset PASSED
-tests/test_ups_device.py::TestU16le::test_default_offset PASSED
-tests/test_ups_device.py::TestFormatDeviceError::test_file_not_found PASSED
-tests/test_ups_device.py::TestFormatDeviceError::test_permission_denied PASSED
-tests/test_ups_device.py::TestFormatDeviceError::test_generic_os_error PASSED
-tests/test_ups_device.py::TestUPSMetricsDataclass::test_as_dict PASSED
-tests/test_ups_device.py::TestUPSMetricsDataclass::test_field_types PASSED
-tests/test_ups_device.py::TestUPSDeviceHardware::test_device_opens_and_closes PASSED
-tests/test_ups_device.py::TestUPSDeviceHardware::test_device_context_manager PASSED
-tests/test_ups_device.py::TestUPSDeviceHardware::test_read_metrics_returns_valid_data PASSED
-tests/test_ups_device.py::TestUPSDeviceHardware::test_read_metrics_consistency PASSED
-tests/test_ups_device.py::TestUPSDeviceHardware::test_permissions_error_handling SKIPPED
-tests/test_ups_status.py::test_ups_status_returns_zero_on_success PASSED
-tests/test_ups_status.py::test_ups_status_output_format PASSED
-tests/test_ups_status.py::test_ups_status_physical_range PASSED
-
-======================== 14 passed, 1 skipped in 0.15s =========================
-```
+- No `sys.path` manipulation is needed: `pytest.ini` sets `pythonpath = .`.
+- Discovery tests build a throwaway sysfs tree under `tmp_path` and pass it to
+  `find_ups_device(sysfs_dir=...)`, so they do not depend on the real machine.
+- Decoding tests monkeypatch `ups_device.fcntl.ioctl`, so the report-ID map and
+  unit scaling are covered without a UPS attached.

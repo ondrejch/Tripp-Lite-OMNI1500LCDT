@@ -1,96 +1,111 @@
 """Tests for the CLI ups_status tool.
 
-These tests verify the CLI behavior, including exit codes and output format.
+The device is monkeypatched, so these tests run without hardware. The text
+output format is a stable interface used by shell scripts; it is asserted here.
 """
 
+from __future__ import annotations
+
+import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 
-def test_ups_status_returns_zero_on_success(ups):
-    """ups_status.py exits with 0 when UPS available."""
+import ups_status
+from ups_device import UPSMetrics, UPSReadError
+
+
+@pytest.fixture
+def metrics() -> UPSMetrics:
+    return UPSMetrics(
+        timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        load_percent=22,
+        active_power_watts=162,
+        voltage_volts=122.3,
+        current_amps=1.3,
+        input_frequency_hz=60.2,
+        output_frequency_hz=60.1,
+        nominal_voltage_volts=120,
+    )
+
+
+class TestFormatMetrics:
+    def test_text_output_is_key_value_lines(self, metrics):
+        lines = ups_status.format_metrics(metrics).splitlines()
+        parsed = dict(line.split("=", 1) for line in lines)
+
+        assert parsed["load_percent"] == "22"
+        assert parsed["active_power_watts"] == "162"
+        assert parsed["voltage_volts"] == "122.3"
+        assert parsed["current_amps"] == "1.3"
+        assert parsed["input_frequency_hz"] == "60.2"
+        assert parsed["output_frequency_hz"] == "60.1"
+        assert parsed["nominal_voltage_volts"] == "120"
+        assert datetime.fromisoformat(parsed["timestamp"]) == metrics.timestamp
+
+    def test_json_output_is_one_object(self, metrics):
+        payload = json.loads(ups_status.format_metrics(metrics, as_json=True))
+        assert payload["load_percent"] == 22
+        assert payload["apparent_power_va"] == pytest.approx(159.0)
+        assert payload["timestamp"] == metrics.timestamp.isoformat()
+
+
+class TestMain:
+    def test_exit_zero_and_output(self, monkeypatch, capsys, metrics):
+        monkeypatch.setattr(ups_status, "read_metrics_once", lambda path=None: metrics)
+        assert ups_status.main([]) == 0
+        assert "load_percent=22" in capsys.readouterr().out
+
+    def test_json_flag(self, monkeypatch, capsys, metrics):
+        monkeypatch.setattr(ups_status, "read_metrics_once", lambda path=None: metrics)
+        assert ups_status.main(["--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["voltage_volts"] == 122.3
+
+    def test_device_flag_is_passed_through(self, monkeypatch, capsys, metrics):
+        seen = {}
+        monkeypatch.setattr(
+            ups_status,
+            "read_metrics_once",
+            lambda path=None: seen.update(path=path) or metrics,
+        )
+        assert ups_status.main(["--device", "/dev/hidraw5"]) == 0
+        assert seen["path"] == "/dev/hidraw5"
+
+    def test_read_error_exits_one(self, monkeypatch, capsys):
+        def boom(path=None):
+            raise UPSReadError("UPS not found")
+
+        monkeypatch.setattr(ups_status, "read_metrics_once", boom)
+        assert ups_status.main([]) == 1
+        assert "UPS not found" in capsys.readouterr().err
+
+    def test_bad_interval_exits_two(self, capsys):
+        assert ups_status.main(["--interval", "-1"]) == 2
+        assert "non-negative" in capsys.readouterr().err
+
+    def test_count_stops_stream(self, monkeypatch, capsys, metrics):
+        monkeypatch.setattr(ups_status, "read_metrics_once", lambda path=None: metrics)
+        monkeypatch.setattr(ups_status.time, "sleep", lambda _s: None)
+        assert ups_status.main(["--interval", "0.01", "--count", "3"]) == 0
+        assert capsys.readouterr().out.count("load_percent=") == 3
+
+
+@pytest.mark.hardware
+def test_ups_status_cli_against_hardware(ups):
+    """Smoke-test the real CLI end to end against the UPS."""
     ups.require_ups()
-    
     repo_dir = Path(__file__).parent.parent
     result = subprocess.run(
-        [sys.executable, str(repo_dir / "ups_status.py")],
+        [sys.executable, str(repo_dir / "ups_status.py"), "--json"],
         capture_output=True,
         text=True,
         cwd=str(repo_dir),
+        check=False,
     )
-    
-    assert result.returncode == 0
-    assert "load_percent=" in result.stdout
-    assert "active_power_watts=" in result.stdout
-    assert "voltage_volts=" in result.stdout
-
-
-def test_ups_status_output_format(ups):
-    """ups_status.py outputs all required metrics."""
-    ups.require_ups()
-    
-    repo_dir = Path(__file__).parent.parent
-    result = subprocess.run(
-        [sys.executable, str(repo_dir / "ups_status.py")],
-        capture_output=True,
-        text=True,
-        cwd=str(repo_dir),
-    )
-    
-    assert result.returncode == 0
-    
-    # Parse output
-    lines = result.stdout.strip().split("\n")
-    metrics = {}
-    for line in lines:
-        key, value = line.split("=", 1)
-        metrics[key] = value
-    
-    assert "load_percent" in metrics
-    assert "active_power_watts" in metrics
-    assert "voltage_volts" in metrics
-    assert "current_amps" in metrics
-    assert "input_frequency_hz" in metrics
-    assert "output_frequency_hz" in metrics
-    assert "nominal_voltage_volts" in metrics
-    
-    # Check value formats
-    assert int(metrics["load_percent"]) >= 0
-    assert int(metrics["active_power_watts"]) >= 0
-    float(metrics["voltage_volts"]) > 0
-    float(metrics["current_amps"]) >= 0
-    float(metrics["input_frequency_hz"]) > 0
-    float(metrics["output_frequency_hz"]) > 0
-    int(metrics["nominal_voltage_volts"]) > 0
-
-
-def test_ups_status_physical_range(ups):
-    """ups_status.py returns physically reasonable values."""
-    ups.require_ups()
-    
-    repo_dir = Path(__file__).parent.parent
-    result = subprocess.run(
-        [sys.executable, str(repo_dir / "ups_status.py")],
-        capture_output=True,
-        text=True,
-        cwd=str(repo_dir),
-    )
-    
-    assert result.returncode == 0
-    
-    lines = result.stdout.strip().split("\n")
-    metrics = {k: v for k, v in (l.split("=", 1) for l in lines)}
-    
-    # Physical sanity checks
-    load = int(metrics["load_percent"])
-    power = int(metrics["active_power_watts"])
-    voltage = float(metrics["voltage_volts"])
-    freq_in = float(metrics["input_frequency_hz"])
-    freq_out = float(metrics["output_frequency_hz"])
-    
-    assert 0 <= load <= 100, f"Load {load}% out of range"
-    assert 0 <= power <= 900, f"Power {power}W exceeds UPS capacity"
-    assert 100 <= voltage <= 140, f"Voltage {voltage}V out of range"
-    assert 55 <= freq_in <= 65, f"Input freq {freq_in}Hz unusual"
-    assert 55 <= freq_out <= 65, f"Output freq {freq_out}Hz unusual"
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert 0 <= payload["load_percent"] <= 100
+    assert 100 <= payload["voltage_volts"] <= 140

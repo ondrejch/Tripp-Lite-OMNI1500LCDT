@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tripp-lite-omni1500lcdt"
+version = "0.2.0"
+description = "Read power metrics from a Tripp Lite OMNI1500LCDT UPS over hidraw"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PyQt5", "pyqtgraph"]
+dev = ["pytest>=7", "ruff"]
+
+[project.scripts]
+ups-status = "ups_status:main"
+
+[tool.setuptools]
+py-modules = [
+    "ups_device",
+    "ups_poller",
+    "ups_status",
+    "ups_theme",
+    "ups_monitor_tk",
+    "ups_monitor_pyqt5",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
