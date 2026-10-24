@@ -59,6 +59,26 @@ def severity_color(load_percent: int) -> str:
     return GREEN
 
 
+def severity_label(load_percent: int) -> str:
+    """Short human-readable name for a load severity band."""
+    if load_percent >= LOAD_RED_PERCENT:
+        return "Critical"
+    if load_percent >= LOAD_AMBER_PERCENT:
+        return "Elevated"
+    return "Normal"
+
+
+def load_arc(percent: float, start_deg: float = 90.0) -> tuple[float, float]:
+    """Arc start/span for a ring gauge, clockwise from the top.
+
+    Qt and Tk both measure arc spans counter-clockwise and in 1/16 degree
+    units at the API boundary, so the span is returned as a negative value
+    already scaled to degrees. The percentage is clamped to 0-100.
+    """
+    clamped = max(0.0, min(100.0, float(percent)))
+    return (float(start_deg), -3.6 * clamped)
+
+
 def capacity_caption(metrics: UPSMetrics) -> str:
     """Describe the load in the same units the percentage refers to.
 

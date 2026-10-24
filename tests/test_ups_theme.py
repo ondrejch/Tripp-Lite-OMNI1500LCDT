@@ -29,6 +29,27 @@ def test_severity_thresholds():
     assert ups_theme.severity_color(ups_theme.LOAD_RED_PERCENT) == ups_theme.RED
 
 
+def test_severity_labels():
+    assert ups_theme.severity_label(0) == "Normal"
+    assert ups_theme.severity_label(ups_theme.LOAD_AMBER_PERCENT - 1) == "Normal"
+    assert ups_theme.severity_label(ups_theme.LOAD_AMBER_PERCENT) == "Elevated"
+    assert ups_theme.severity_label(ups_theme.LOAD_RED_PERCENT - 1) == "Elevated"
+    assert ups_theme.severity_label(ups_theme.LOAD_RED_PERCENT) == "Critical"
+
+
+def test_load_arc_starts_at_top_and_runs_clockwise():
+    start, span = ups_theme.load_arc(0)
+    assert start == 90.0
+    assert span == 0.0
+    assert ups_theme.load_arc(25) == (90.0, -90.0)
+    assert ups_theme.load_arc(100) == (90.0, -360.0)
+
+
+def test_load_arc_clamps_out_of_range_values():
+    assert ups_theme.load_arc(-5) == (90.0, 0.0)
+    assert ups_theme.load_arc(180) == (90.0, -360.0)
+
+
 def test_capacity_caption_uses_matching_units():
     caption = ups_theme.capacity_caption(_metrics(load=10, watts=90))
     # 120 V * 0.75 A = 90 VA, matching the 10 % of 1500 VA load reading.
