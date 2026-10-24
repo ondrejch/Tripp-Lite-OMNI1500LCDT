@@ -3,7 +3,7 @@ PYTHON := $(VENV)/bin/python
 PYINSTALLER := $(VENV)/bin/pyinstaller
 SPEC := ups_monitor_pyqt5.spec
 TARGET := dist/ups_monitor_pyqt5
-SOURCES := ups_monitor_pyqt5.py ups_device.py $(SPEC)
+SOURCES := ups_monitor_pyqt5.py ups_device.py ups_poller.py ups_theme.py $(SPEC)
 
 .PHONY: all build deps run clean
 

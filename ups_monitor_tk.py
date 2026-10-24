@@ -13,6 +13,9 @@ from ups_theme import (
     BLUE,
     CARD_BG,
     CARD_BORDER,
+    FONT_HERO,
+    FONT_LABEL,
+    FONT_VALUE,
     GREEN,
     RED,
     TEXT_MUTED,
@@ -47,10 +50,13 @@ class UPSMonitorApp(tk.Tk):
         self.tick_id: str | None = None
 
         family = tkfont.nametofont("TkDefaultFont").actual("family")
-        self.big_font = tkfont.Font(family=family, size=48, weight="bold")
-        self.value_font = tkfont.Font(family=family, size=15, weight="bold")
-        self.label_font = tkfont.Font(family=family, size=11)
-        self.caption_font = tkfont.Font(family=family, size=10)
+        number_family = tkfont.nametofont("TkFixedFont").actual("family")
+        self.ui_family = family
+        # Fixed-width digits so live values do not shift the layout.
+        self.big_font = tkfont.Font(family=number_family, size=FONT_HERO - 6, weight="bold")
+        self.unit_font = tkfont.Font(family=number_family, size=FONT_HERO // 2, weight="bold")
+        self.value_font = tkfont.Font(family=number_family, size=FONT_VALUE, weight="bold")
+        self.caption_font = tkfont.Font(family=family, size=FONT_LABEL)
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -76,7 +82,7 @@ class UPSMonitorApp(tk.Tk):
         tk.Label(
             container,
             text="Tripp Lite OMNI1500LCDT",
-            font=tkfont.Font(family=self.big_font.actual("family"), size=19, weight="bold"),
+            font=tkfont.Font(family=self.ui_family, size=19, weight="bold"),
             bg=WINDOW_BG,
             fg=TEXT_PRIMARY,
         ).pack(anchor="w")
@@ -98,12 +104,15 @@ class UPSMonitorApp(tk.Tk):
             hero_top, text="CURRENT DRAW", font=self.caption_font, bg=CARD_BG, fg=TEXT_MUTED
         ).pack(anchor="w")
 
-        self.watts_value = tk.Label(hero, text="--", font=self.big_font, bg=CARD_BG, fg=GREEN)
-        self.watts_value.pack(anchor="w", padx=18)
-
-        tk.Label(hero, text="watts", font=self.label_font, bg=CARD_BG, fg=TEXT_MUTED).pack(
-            anchor="w", padx=18, pady=(0, 12)
+        hero_value_row = tk.Frame(hero, bg=CARD_BG)
+        hero_value_row.pack(anchor="w", padx=18, pady=(0, 12))
+        self.watts_value = tk.Label(
+            hero_value_row, text="--", font=self.big_font, bg=CARD_BG, fg=TEXT_PRIMARY
         )
+        self.watts_value.pack(side=tk.LEFT)
+        tk.Label(
+            hero_value_row, text="W", font=self.unit_font, bg=CARD_BG, fg=TEXT_MUTED
+        ).pack(side=tk.LEFT, anchor="s", pady=(0, 10))
 
         load_card = self._card(container)
         load_card.pack(fill=tk.X, pady=(14, 0))
@@ -160,7 +169,9 @@ class UPSMonitorApp(tk.Tk):
         self.last_metrics = metrics
         self.last_sample_monotonic = time.monotonic()
 
-        self.watts_value.config(text=str(metrics.active_power_watts), fg=color)
+        # Real power is not the warning metric; the load bar/percentage owns
+        # the severity colour.
+        self.watts_value.config(text=str(metrics.active_power_watts), fg=TEXT_PRIMARY)
         self.load_value.config(text=f"{metrics.load_percent}%", fg=color)
         self.load_caption.config(text=capacity_caption(metrics))
 

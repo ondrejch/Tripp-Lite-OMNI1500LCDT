@@ -25,6 +25,30 @@ LOAD_RED_PERCENT = 80
 
 CAPACITY_LABEL = f"{UPS_CAPACITY_VA} VA / {UPS_CAPACITY_WATTS} W"
 
+# Real power at which the load warning colour starts (80 % of 900 W).
+POWER_WARN_WATTS = round(UPS_CAPACITY_WATTS * LOAD_RED_PERCENT / 100)
+
+# Type scale, in points, shared by both frontends. Kept to four sizes so the
+# dashboards read as one design instead of a pile of labels.
+FONT_HERO = 54
+FONT_SECONDARY = 32
+FONT_VALUE = 18
+FONT_LABEL = 10
+
+# Unit text next to a value is drawn at this fraction of the value size.
+UNIT_RATIO = 0.5
+
+
+def power_axis_range(peak_watts: float) -> tuple[float, float]:
+    """Zero-based chart range with headroom, never shorter than the rating.
+
+    Auto-ranging the power chart from its minimum value makes a quiet UPS look
+    busy and hides how much of the 900 W budget is in use, so the axis always
+    starts at zero and always shows the nameplate rating.
+    """
+    top = max(float(UPS_CAPACITY_WATTS), float(peak_watts)) * 1.1
+    return (0.0, round(top, 1))
+
 
 def severity_color(load_percent: int) -> str:
     """Map a UPS load percentage to a traffic-light colour."""
