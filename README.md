@@ -141,7 +141,7 @@ python3 ups_monitor_pyqt5.py
 python3 ups_monitor_pyqt5.py --compact   # ring gauge only, always on top
 ```
 
-Live power and load history charts (last 5 minutes), a ring gauge for load,
+Live power history chart (last 5 minutes), a ring gauge for load,
 large numeric displays, detailed metric cards, a severity chip, a status pill,
 and colour-coded load warnings. `Ctrl+M` toggles compact mode, which hides the
 charts and details and keeps the window on top for a small always-visible
