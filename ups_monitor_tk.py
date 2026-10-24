@@ -24,6 +24,7 @@ from ups_theme import (
     capacity_caption,
     format_local_time,
     severity_color,
+    severity_label,
 )
 
 LOAD_BAR_WIDTH = 360
@@ -125,6 +126,20 @@ class UPSMonitorApp(tk.Tk):
         self.load_value = tk.Label(load_header, text="--%", font=self.value_font, bg=CARD_BG, fg=BLUE)
         self.load_value.pack(side=tk.RIGHT)
 
+        self.severity_chip = tk.Label(
+            load_header,
+            text="--",
+            font=self.caption_font,
+            bg=CARD_BG,
+            fg=TEXT_MUTED,
+            bd=0,
+            padx=7,
+            pady=2,
+            highlightthickness=1,
+            highlightbackground=CARD_BORDER,
+        )
+        self.severity_chip.pack(side=tk.RIGHT, padx=(0, 10))
+
         self.load_canvas = tk.Canvas(
             load_card, width=LOAD_BAR_WIDTH, height=18, bg=CARD_BG, highlightthickness=0
         )
@@ -173,6 +188,11 @@ class UPSMonitorApp(tk.Tk):
         # the severity colour.
         self.watts_value.config(text=str(metrics.active_power_watts), fg=TEXT_PRIMARY)
         self.load_value.config(text=f"{metrics.load_percent}%", fg=color)
+        self.severity_chip.config(
+            text=severity_label(metrics.load_percent).upper(),
+            fg=color,
+            highlightbackground=color,
+        )
         self.load_caption.config(text=capacity_caption(metrics))
 
         bar_width = int((metrics.load_percent / 100) * LOAD_BAR_WIDTH)
@@ -195,6 +215,7 @@ class UPSMonitorApp(tk.Tk):
         if self.last_metrics is None:
             self.watts_value.config(text="--", fg=RED)
             self.load_value.config(text="--%", fg=RED)
+            self.severity_chip.config(text="OFFLINE", fg=RED, highlightbackground=RED)
             self.load_caption.config(text="No UPS data yet")
 
     def render_stale(self, age_s: float) -> None:

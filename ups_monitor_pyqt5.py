@@ -3,13 +3,21 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from collections import deque
 
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PyQt5.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QKeySequence,
+    QPainter,
+    QPen,
+)
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,7 +26,9 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QProgressBar,
+    QPushButton,
+    QShortcut,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -32,7 +42,6 @@ from ups_theme import (
     CARD_BORDER,
     FONT_HERO,
     FONT_LABEL,
-    FONT_SECONDARY,
     FONT_VALUE,
     GREEN,
     PANEL_BG,
@@ -44,13 +53,17 @@ from ups_theme import (
     WINDOW_BG,
     capacity_caption,
     format_local_time,
+    load_arc,
     power_axis_range,
     severity_color,
+    severity_label,
 )
 
 UI_TICK_MS = 200
 STALE_AFTER_S = 3.0
 HISTORY_POINTS = 300
+NORMAL_SIZE = QSize(980, 760)
+COMPACT_SIZE = QSize(700, 400)
 
 
 def _font(size: int, bold: bool = False) -> QFont:
@@ -77,6 +90,85 @@ def _with_unit(value: str, unit: str, size: int, tight: bool = False) -> str:
         f'{value}<span style="font-size:{unit_pt}pt; font-weight:600;'
         f' color:{TEXT_MUTED};">{gap}{unit}</span>'
     )
+
+
+class LoadGauge(QWidget):
+    """Ring gauge showing the load percentage as a clockwise arc."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._percent: int | None = None
+        self._color = BLUE
+        self.setMinimumSize(160, 160)
+        self.setMaximumHeight(210)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_load(self, percent: int | None, color: str = BLUE) -> None:
+        self._percent = percent
+        self._color = color
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        side = float(min(self.width(), self.height()))
+        thickness = max(10.0, round(side * 0.08))
+        margin = thickness / 2.0 + 2.0
+        rect = QRectF(
+            (self.width() - side) / 2.0 + margin,
+            (self.height() - side) / 2.0 + margin,
+            side - 2.0 * margin,
+            side - 2.0 * margin,
+        )
+
+        painter.setPen(QPen(QColor(CARD_BORDER), thickness, Qt.SolidLine, Qt.RoundCap))
+        painter.drawArc(rect, 90 * 16, -360 * 16)
+
+        if self._percent is not None:
+            start, span = load_arc(self._percent)
+            painter.setPen(QPen(QColor(self._color), thickness, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(rect, int(start * 16), int(span * 16))
+
+        value_font = _numeric_font(max(16, round(side * 0.20)))
+        unit_font = _font(max(9, round(side * 0.10)), bold=True)
+        fm_value = QFontMetricsF(value_font)
+        fm_unit = QFontMetricsF(unit_font)
+
+        value_text = "--" if self._percent is None else str(self._percent)
+        unit_text = "" if self._percent is None else "%"
+        total = fm_value.width(value_text) + fm_unit.width(unit_text)
+        baseline = (
+            rect.center().y()
+            + (fm_value.ascent() - fm_value.descent()) / 2.0
+        )
+        x = rect.center().x() - total / 2.0
+
+        painter.setFont(value_font)
+        painter.setPen(QPen(QColor(self._color if self._percent is not None else TEXT_MUTED)))
+        painter.drawText(QPointF(x, baseline), value_text)
+        if unit_text:
+            painter.setFont(unit_font)
+            painter.setPen(QPen(QColor(TEXT_MUTED)))
+            painter.drawText(QPointF(x + fm_value.width(value_text), baseline), unit_text)
+
+
+class StatusChip(QLabel):
+    """Small rounded text badge for the load severity band."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFont(_font(FONT_LABEL, bold=True))
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedHeight(22)
+        self.set_state("--", TEXT_MUTED)
+
+    def set_state(self, text: str, color: str) -> None:
+        self.setText(text.upper())
+        self.setStyleSheet(
+            f"color: {color}; border: 1px solid {color}; border-radius: 10px;"
+            " padding: 2px 9px; background: transparent;"
+        )
 
 
 class MetricCard(QFrame):
@@ -108,7 +200,7 @@ class MetricCard(QFrame):
 
 
 class UPSDashboard(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, compact: bool = False) -> None:
         super().__init__()
         self.poller = BackgroundPoller(interval_s=1.0)
         self.history_minutes: deque[float] = deque(maxlen=HISTORY_POINTS)
@@ -117,9 +209,11 @@ class UPSDashboard(QMainWindow):
         self.start_monotonic: float | None = None
         self.last_metrics: UPSMetrics | None = None
         self.last_sample_monotonic: float | None = None
+        self._compact = False
+        self._normal_size = QSize(NORMAL_SIZE)
 
         self.setWindowTitle("Tripp Lite OMNI1500LCDT Monitor")
-        self.resize(980, 760)
+        self.resize(NORMAL_SIZE)
         self._build_ui()
 
         self.poll_timer = QTimer(self)
@@ -127,6 +221,8 @@ class UPSDashboard(QMainWindow):
         self.poll_timer.start(UI_TICK_MS)
 
         self.poller.start()
+        if compact:
+            self.compact_button.setChecked(True)
 
     # -- UI ---------------------------------------------------------------
 
@@ -139,14 +235,29 @@ class UPSDashboard(QMainWindow):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
         title = QLabel("Tripp Lite OMNI1500LCDT")
         title.setFont(_font(20, bold=True))
         title.setStyleSheet(f"color: {TEXT_PRIMARY};")
-        subtitle = QLabel("Continuous UPS output monitoring over direct USB HID")
-        subtitle.setFont(_font(FONT_LABEL))
-        subtitle.setStyleSheet(f"color: {TEXT_MUTED};")
-        root.addWidget(title)
-        root.addWidget(subtitle)
+        self.subtitle = QLabel("Continuous UPS output monitoring over direct USB HID")
+        self.subtitle.setFont(_font(FONT_LABEL))
+        self.subtitle.setStyleSheet(f"color: {TEXT_MUTED};")
+        titles.addWidget(title)
+        titles.addWidget(self.subtitle)
+        header.addLayout(titles)
+        header.addStretch(1)
+
+        self.compact_button = QPushButton("Compact")
+        self.compact_button.setObjectName("compactButton")
+        self.compact_button.setCheckable(True)
+        self.compact_button.setCursor(Qt.PointingHandCursor)
+        self.compact_button.setToolTip("Compact always-on-top mode (Ctrl+M)")
+        self.compact_button.toggled.connect(self._apply_compact)
+        header.addWidget(self.compact_button, 0, Qt.AlignTop)
+        root.addLayout(header)
 
         hero_row = QHBoxLayout()
         hero_row.setSpacing(12)
@@ -154,44 +265,49 @@ class UPSDashboard(QMainWindow):
         power_group = QGroupBox("CURRENT DRAW")
         power_layout = QVBoxLayout(power_group)
         power_layout.setContentsMargins(16, 12, 16, 12)
-        power_layout.setSpacing(0)
+        power_layout.setSpacing(2)
+        power_layout.addStretch(1)
         self.power_value = QLabel("--")
         self.power_value.setFont(_numeric_font(FONT_HERO))
         self.power_value.setTextFormat(Qt.RichText)
         self.power_value.setStyleSheet(f"color: {TEXT_PRIMARY};")
         self.power_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         power_layout.addWidget(self.power_value)
+        power_caption = QLabel(f"Real power · {UPS_CAPACITY_WATTS} W continuous rating")
+        power_caption.setFont(_font(FONT_LABEL))
+        power_caption.setStyleSheet(f"color: {TEXT_MUTED};")
+        power_layout.addWidget(power_caption)
+        power_layout.addStretch(1)
         hero_row.addWidget(power_group, 1)
 
         load_group = QGroupBox("UPS LOAD")
         load_layout = QVBoxLayout(load_group)
-        load_layout.setContentsMargins(16, 12, 16, 12)
-        load_layout.setSpacing(6)
-        self.load_value = QLabel("--%")
-        self.load_value.setFont(_numeric_font(FONT_SECONDARY))
-        self.load_value.setTextFormat(Qt.RichText)
-        self.load_value.setStyleSheet(f"color: {BLUE};")
-        load_layout.addWidget(self.load_value)
-        self.load_bar = QProgressBar()
-        self.load_bar.setRange(0, 100)
-        self.load_bar.setTextVisible(False)
-        self.load_bar.setFixedHeight(12)
-        self._style_progress_bar(BLUE)
-        load_layout.addWidget(self.load_bar)
+        load_layout.setContentsMargins(16, 8, 16, 12)
+        load_layout.setSpacing(2)
+
+        chip_row = QHBoxLayout()
+        chip_row.addStretch(1)
+        self.severity_chip = StatusChip()
+        chip_row.addWidget(self.severity_chip)
+        load_layout.addLayout(chip_row)
+
+        self.load_gauge = LoadGauge()
+        load_layout.addWidget(self.load_gauge, 1)
         self.load_caption = QLabel("Waiting for data")
         self.load_caption.setFont(_font(FONT_LABEL))
         self.load_caption.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.load_caption.setAlignment(Qt.AlignCenter)
         load_layout.addWidget(self.load_caption)
         hero_row.addWidget(load_group, 1)
 
         root.addLayout(hero_row)
 
-        charts_group = QGroupBox("LIVE HISTORY")
-        charts_layout = QVBoxLayout(charts_group)
+        self.charts_group = QGroupBox("LIVE HISTORY")
+        charts_layout = QVBoxLayout(self.charts_group)
         charts_layout.setContentsMargins(12, 14, 12, 10)
         charts_layout.setSpacing(4)
 
-        self.power_plot = self._make_plot("Power", "W", 240, show_time_label=False)
+        self.power_plot = self._make_plot("Power", "W", 190, show_time_label=False)
         self.power_plot.setYRange(0, UPS_CAPACITY_WATTS * 1.1, padding=0)
         self.power_curve = self.power_plot.plot(
             pen=pg.mkPen(GREEN, width=2),
@@ -201,7 +317,7 @@ class UPSDashboard(QMainWindow):
         self._add_threshold(self.power_plot, POWER_WARN_WATTS, AMBER)
         self._add_threshold(self.power_plot, UPS_CAPACITY_WATTS, RED)
 
-        self.load_plot = self._make_plot("Load", "%", 150, show_time_label=True)
+        self.load_plot = self._make_plot("Load", "%", 120, show_time_label=True)
         self.load_plot.setYRange(0, 100, padding=0)
         self.load_curve = self.load_plot.plot(
             pen=pg.mkPen(BLUE, width=2),
@@ -221,10 +337,10 @@ class UPSDashboard(QMainWindow):
         hint.setStyleSheet(f"color: {TEXT_MUTED};")
         hint.setAlignment(Qt.AlignRight)
         charts_layout.addWidget(hint)
-        root.addWidget(charts_group, 1)
+        root.addWidget(self.charts_group, 1)
 
-        metrics_group = QGroupBox("DETAILS")
-        metrics_layout = QGridLayout(metrics_group)
+        self.metrics_group = QGroupBox("DETAILS")
+        metrics_layout = QGridLayout(self.metrics_group)
         metrics_layout.setContentsMargins(12, 14, 12, 12)
         metrics_layout.setHorizontalSpacing(12)
         metrics_layout.setVerticalSpacing(12)
@@ -247,12 +363,31 @@ class UPSDashboard(QMainWindow):
         for index, card in enumerate(cards):
             metrics_layout.addWidget(card, index // 3, index % 3)
 
-        root.addWidget(metrics_group)
+        root.addWidget(self.metrics_group)
 
-        self.statusBar().setStyleSheet(
-            f"QStatusBar {{ background-color: {WINDOW_BG}; color: {TEXT_MUTED}; }}"
-        )
-        self.statusBar().showMessage("Waiting for UPS data…")
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        self.status_pill = QFrame()
+        self.status_pill.setObjectName("statusPill")
+        pill_layout = QHBoxLayout(self.status_pill)
+        pill_layout.setContentsMargins(10, 3, 12, 3)
+        pill_layout.setSpacing(6)
+        self.status_dot = QLabel("●")
+        self.status_dot.setFont(_font(FONT_LABEL, bold=True))
+        self.status_dot.setStyleSheet(f"color: {GREEN};")
+        self.status_text = QLabel("Waiting for UPS data…")
+        self.status_text.setFont(_font(FONT_LABEL))
+        self.status_text.setStyleSheet(f"color: {TEXT_MUTED};")
+        pill_layout.addWidget(self.status_dot)
+        pill_layout.addWidget(self.status_text)
+        footer.addWidget(self.status_pill)
+        footer.addStretch(1)
+        root.addLayout(footer)
+
+        self._set_status("Waiting for UPS data…", AMBER)
+
+        self._compact_shortcut = QShortcut(QKeySequence("Ctrl+M"), self)
+        self._compact_shortcut.activated.connect(self.compact_button.toggle)
 
         self.setStyleSheet(
             f"QMainWindow {{ background-color: {WINDOW_BG}; }}"
@@ -266,6 +401,15 @@ class UPSDashboard(QMainWindow):
             "QLabel { background: transparent; border: none; }"
             f"QFrame#metricCard {{ background-color: {PANEL_BG};"
             f" border: 1px solid {CARD_BORDER}; border-radius: 10px; }}"
+            f"QFrame#statusPill {{ background-color: {PANEL_BG};"
+            f" border: 1px solid {CARD_BORDER}; border-radius: 11px; }}"
+            f"QPushButton#compactButton {{ background-color: {PANEL_BG};"
+            f" color: {TEXT_MUTED}; border: 1px solid {CARD_BORDER};"
+            " border-radius: 8px; padding: 5px 12px; font-weight: 600; }"
+            f"QPushButton#compactButton:hover {{ color: {TEXT_PRIMARY};"
+            f" border-color: {TEXT_MUTED}; }}"
+            f"QPushButton#compactButton:checked {{ color: {TEXT_PRIMARY};"
+            f" border-color: {BLUE}; }}"
         )
 
     def _make_plot(
@@ -283,7 +427,7 @@ class UPSDashboard(QMainWindow):
             # The load chart below is X-linked and carries the shared time axis.
             plot.hideAxis("bottom")
         left_axis = plot.getAxis("left")
-        left_axis.setWidth(48)
+        left_axis.setWidth(64)
         left_axis.setPen(pg.mkPen(CARD_BORDER))
         left_axis.setTextPen(pg.mkPen(TEXT_MUTED))
         if show_time_label:
@@ -308,11 +452,29 @@ class UPSDashboard(QMainWindow):
             )
         )
 
-    def _style_progress_bar(self, color: str) -> None:
-        self.load_bar.setStyleSheet(
-            f"QProgressBar {{ border: 0; border-radius: 6px; background-color: {PANEL_BG}; }}"
-            f"QProgressBar::chunk {{ border-radius: 6px; background-color: {color}; }}"
-        )
+    def _set_status(self, text: str, color: str = GREEN) -> None:
+        """Update the footer status pill (dot colour plus message)."""
+        self.status_dot.setStyleSheet(f"color: {color};")
+        self.status_text.setText(text)
+
+    def _apply_compact(self, compact: bool) -> None:
+        if compact == self._compact:
+            return
+        was_visible = self.isVisible()
+        self._compact = compact
+        for widget in (self.subtitle, self.charts_group, self.metrics_group):
+            widget.setVisible(not compact)
+
+        flags = self.windowFlags()
+        if compact:
+            self._normal_size = self.size()
+            flags |= Qt.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.resize(COMPACT_SIZE if compact else self._normal_size)
+        if was_visible:
+            self.show()
 
     # -- data -------------------------------------------------------------
 
@@ -330,9 +492,10 @@ class UPSDashboard(QMainWindow):
             and self.last_sample_monotonic is not None
             and time.monotonic() - self.last_sample_monotonic > STALE_AFTER_S
         ):
-            self.statusBar().showMessage(
+            self._set_status(
                 f"No data for {time.monotonic() - self.last_sample_monotonic:.0f}s "
-                "— showing last sample"
+                "— showing last sample",
+                AMBER,
             )
 
     def render_metrics(self, metrics: UPSMetrics) -> None:
@@ -341,12 +504,10 @@ class UPSDashboard(QMainWindow):
         color = severity_color(metrics.load_percent)
 
         # Real power is not the warning metric: keep it neutral and let the
-        # load percentage and bar carry the severity colour.
+        # gauge and severity chip carry the warning colour.
         self.power_value.setText(_with_unit(str(metrics.active_power_watts), "W", FONT_HERO))
-        self.load_value.setText(_with_unit(str(metrics.load_percent), "%", FONT_SECONDARY, tight=True))
-        self.load_value.setStyleSheet(f"color: {color};")
-        self.load_bar.setValue(metrics.load_percent)
-        self._style_progress_bar(color)
+        self.load_gauge.set_load(metrics.load_percent, color)
+        self.severity_chip.set_state(severity_label(metrics.load_percent), color)
         self.load_caption.setText(capacity_caption(metrics))
 
         self.voltage_card.set_value(f"{metrics.voltage_volts:.1f}", "V")
@@ -364,17 +525,18 @@ class UPSDashboard(QMainWindow):
         self.history_load.append(metrics.load_percent)
         self._refresh_plots()
 
-        self.statusBar().showMessage(
+        self._set_status(
             f"Live · {metrics.active_power_watts} W · {metrics.load_percent}% load · "
-            f"{metrics.voltage_volts:.1f} V · {metrics.apparent_power_va:.0f} VA"
+            f"{metrics.voltage_volts:.1f} V · {metrics.apparent_power_va:.0f} VA",
+            GREEN,
         )
 
     def render_error(self, message: str) -> None:
-        self.statusBar().showMessage(message)
+        self._set_status(message, RED)
         if self.last_metrics is None:
             self.power_value.setText("--")
-            self.load_value.setText("--%")
-            self.load_value.setStyleSheet(f"color: {RED};")
+            self.load_gauge.set_load(None, RED)
+            self.severity_chip.set_state("Offline", RED)
             self.load_caption.setText("No UPS data yet")
 
     def _refresh_plots(self) -> None:
@@ -398,12 +560,20 @@ class UPSDashboard(QMainWindow):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="PyQt5 dashboard for the OMNI1500LCDT UPS")
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="start in compact always-on-top mode (toggle with Ctrl+M)",
+    )
+    args = parser.parse_args()
+
     # Must be set before the QApplication exists.
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = UPSDashboard()
+    window = UPSDashboard(compact=args.compact)
     window.show()
     app.exec_()
 

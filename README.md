@@ -131,17 +131,21 @@ python3 ups_monitor_tk.py
 ```
 
 Large wattage display, load percentage bar, voltage/current/frequency readings,
-colour-coded load warnings, and a status dot that turns red (with the reason)
-when the UPS stops answering.
+colour-coded load warnings with a severity chip, and a status dot that turns red
+(with the reason) when the UPS stops answering.
 
 ### Option 3: Advanced dashboard (`ups_monitor_pyqt5.py`)
 
 ```bash
 python3 ups_monitor_pyqt5.py
+python3 ups_monitor_pyqt5.py --compact   # ring gauge only, always on top
 ```
 
-Live power and load history charts (last 5 minutes), large numeric displays,
-detailed metric cards, colour-coded load warnings, and a status bar.
+Live power and load history charts (last 5 minutes), a ring gauge for load,
+large numeric displays, detailed metric cards, a severity chip, a status pill,
+and colour-coded load warnings. `Ctrl+M` toggles compact mode, which hides the
+charts and details and keeps the window on top for a small always-visible
+readout.
 
 Both GUIs poll in a **worker thread** (`ups_poller.py`) and only drain a queue
 from the GUI event loop, so a slow or unresponsive UPS cannot freeze the window.
