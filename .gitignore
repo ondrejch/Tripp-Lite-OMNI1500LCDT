@@ -1,3 +1,18 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local environments and build output
+.venv/
+build/
+dist/
+
+# Local agent configuration
+.github/workflows/opencode.yml
+.opencode/
+CODING.md
+
+# Local screenshot working files
+.pics/repository-open-graph-template.png
+.pics/screenshot-pyqt5-scaled-template-aspect.png
+.pics/screenshot-pyqt5-scaled-template.png
