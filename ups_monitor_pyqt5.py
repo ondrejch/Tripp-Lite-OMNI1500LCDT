@@ -205,7 +205,6 @@ class UPSDashboard(QMainWindow):
         self.poller = BackgroundPoller(interval_s=1.0)
         self.history_minutes: deque[float] = deque(maxlen=HISTORY_POINTS)
         self.history_watts: deque[int] = deque(maxlen=HISTORY_POINTS)
-        self.history_load: deque[int] = deque(maxlen=HISTORY_POINTS)
         self.start_monotonic: float | None = None
         self.last_metrics: UPSMetrics | None = None
         self.last_sample_monotonic: float | None = None
@@ -307,7 +306,7 @@ class UPSDashboard(QMainWindow):
         charts_layout.setContentsMargins(12, 14, 12, 10)
         charts_layout.setSpacing(4)
 
-        self.power_plot = self._make_plot("Power", "W", 190, show_time_label=False)
+        self.power_plot = self._make_plot("Power", "W", 250)
         self.power_plot.setYRange(0, UPS_CAPACITY_WATTS * 1.1, padding=0)
         self.power_curve = self.power_plot.plot(
             pen=pg.mkPen(GREEN, width=2),
@@ -317,17 +316,7 @@ class UPSDashboard(QMainWindow):
         self._add_threshold(self.power_plot, POWER_WARN_WATTS, AMBER)
         self._add_threshold(self.power_plot, UPS_CAPACITY_WATTS, RED)
 
-        self.load_plot = self._make_plot("Load", "%", 120, show_time_label=True)
-        self.load_plot.setYRange(0, 100, padding=0)
-        self.load_curve = self.load_plot.plot(
-            pen=pg.mkPen(BLUE, width=2),
-            fillLevel=0,
-            brush=pg.mkBrush(76, 179, 255, 18),
-        )
-        self.load_plot.setXLink(self.power_plot)
-
         charts_layout.addWidget(self.power_plot)
-        charts_layout.addWidget(self.load_plot)
 
         hint = QLabel(
             f'<span style="color:{AMBER};">—</span> {POWER_WARN_WATTS} W warning'
@@ -412,29 +401,22 @@ class UPSDashboard(QMainWindow):
             f" border-color: {BLUE}; }}"
         )
 
-    def _make_plot(
-        self, left_label: str, units: str, height: int, show_time_label: bool
-    ) -> pg.PlotWidget:
+    def _make_plot(self, left_label: str, units: str, height: int) -> pg.PlotWidget:
         plot = pg.PlotWidget()
         plot.setMinimumHeight(height)
         plot.showGrid(x=True, y=True, alpha=0.08)
         plot.setLabel("left", left_label, units=units)
-        if show_time_label:
-            plot.setLabel("bottom", "Time", units="min")
+        plot.setLabel("bottom", "Time", units="min")
         plot.hideAxis("right")
         plot.hideAxis("top")
-        if not show_time_label:
-            # The load chart below is X-linked and carries the shared time axis.
-            plot.hideAxis("bottom")
         left_axis = plot.getAxis("left")
         left_axis.setWidth(64)
         left_axis.setPen(pg.mkPen(CARD_BORDER))
         left_axis.setTextPen(pg.mkPen(TEXT_MUTED))
-        if show_time_label:
-            bottom_axis = plot.getAxis("bottom")
-            bottom_axis.setHeight(42)
-            bottom_axis.setPen(pg.mkPen(CARD_BORDER))
-            bottom_axis.setTextPen(pg.mkPen(TEXT_MUTED))
+        bottom_axis = plot.getAxis("bottom")
+        bottom_axis.setHeight(42)
+        bottom_axis.setPen(pg.mkPen(CARD_BORDER))
+        bottom_axis.setTextPen(pg.mkPen(TEXT_MUTED))
         plot.setMenuEnabled(False)
         plot.setMouseEnabled(x=False, y=False)
         plot.setClipToView(True)
@@ -522,7 +504,6 @@ class UPSDashboard(QMainWindow):
             self.start_monotonic = now
         self.history_minutes.append((now - self.start_monotonic) / 60.0)
         self.history_watts.append(metrics.active_power_watts)
-        self.history_load.append(metrics.load_percent)
         self._refresh_plots()
 
         self._set_status(
@@ -544,12 +525,10 @@ class UPSDashboard(QMainWindow):
             return
         x = list(self.history_minutes)
         self.power_curve.setData(x, list(self.history_watts))
-        self.load_curve.setData(x, list(self.history_load))
 
         last_x = x[-1]
         min_x = max(0.0, last_x - 5.0)
         self.power_plot.setXRange(min_x, max(5.0, last_x + 0.05), padding=0)
-        self.load_plot.setXRange(min_x, max(5.0, last_x + 0.05), padding=0)
         _, top = power_axis_range(max(self.history_watts))
         self.power_plot.setYRange(0, top, padding=0)
 
