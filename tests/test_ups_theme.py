@@ -36,6 +36,16 @@ def test_capacity_caption_uses_matching_units():
     assert "90 W real" in caption
 
 
+def test_load_warning_watts_matches_threshold():
+    assert ups_theme.POWER_WARN_WATTS == 720
+
+
+def test_power_axis_range_keeps_zero_baseline_and_rating():
+    assert ups_theme.power_axis_range(0) == (0.0, 990.0)
+    assert ups_theme.power_axis_range(300) == (0.0, 990.0)
+    assert ups_theme.power_axis_range(1000) == (0.0, 1100.0)
+
+
 def test_format_local_time_handles_naive_and_aware():
     naive = datetime(2024, 1, 1, 12, 0, 0)
     assert ups_theme.format_local_time(naive) == "12:00:00"
